@@ -8,7 +8,7 @@ def parse_requirements(filename: str) -> List[str]:
 
 setup(
     name = 'extractME',
-    version = '0.0.1',
+    version = '0.1.0',
     python_requires = ">=3.13",
     packages = find_packages(),
     author = "Michael Engel",
