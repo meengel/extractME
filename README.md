@@ -1,5 +1,5 @@
 # **extractME** *by Michael Engel*
-This package provides the basic functionalities for extracting zonal statistics and empirical distributions of your regions of interest from (cloud-native) raster-data considering the true area of a pixel. It is designed on top of the [exactextract-package](https://isciences.github.io/exactextract/) incorporating a patched version of the [ERADist and ERANataf classes](https://github.com/ERA-Software/Overview/tree/main/ERADist/ERA_Distribution_Classes_Python/Classes) to support advanced statistical analysis ranging from Bayesian inference to data-aware optimization. It can be used to do your own analysis - simply credit ours by citing our [Zenodo DOI]()!
+This package provides the basic functionalities for extracting zonal statistics and empirical distributions of your regions of interest from (cloud-native) raster-data considering the true area of a pixel. It is designed on top of the [exactextract-package](https://isciences.github.io/exactextract/) incorporating a patched version of the [ERADist and ERANataf classes](https://github.com/ERA-Software/Overview/tree/main/ERADist/ERA_Distribution_Classes_Python/Classes) to support advanced statistical analysis ranging from Bayesian inference to data-aware optimization. It can be used to do your own analysis - simply credit ours by citing our [Zenodo DOI](https://doi.org/10.5281/zenodo.18740287)!
 
 The package supports a variety of different zonal extraction procedures such as
 - intersection based pixel weighting (standard case)
@@ -21,8 +21,9 @@ Based on these, it can be used for advanced analysis of zonal statistics using a
 - exclude undesired values from the calculations
 - returning a GeoDataFrame
 
-## Authors (please use our [Zenodo DOI]()!)
-- Michael Engel
+## Authors (please use our [Zenodo DOI](https://doi.org/10.5281/zenodo.18740287)!)
+- Main: Michael Engel
+- Supporting: Marco Körner
 
 ## Installation
 Currently, we do not provide the package via pip or conda. However, you may install it by installing `numpy`, `scipy`, `rasterio`, `geopandas`, `gdal`, `boto3`, `tqdm` and `exactextract`. In conda, this may look something like `conda create -n extractme -c conda-forge python numpy scipy matplotlib rasterio geopandas gdal boto3 tqdm exactextract`. If you want to store your raw-extractions or quantities to a parquet file, you need to install the respective dependencies for geopandas (i.e. `pyarrow`) as well.
