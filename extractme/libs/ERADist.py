@@ -862,7 +862,7 @@ class ERADist(object):
                 self.Par = {'a_n':pars[2], 'k':pars[0]}
                 self.Dist = stats.weibull_min(c=self.Par['k'], scale=self.Par['a_n'])
                 
-            elif name.lower() == "empirical":
+            elif name.lower() == "empirical": # implemented by Michael Engel
                 X = val[0]
                 weights = val[1]
                 self.Par = {
@@ -872,7 +872,7 @@ class ERADist(object):
                 self.Par.update(val[4])
                 self.Dist = EmpDist(data=X, weights=weights, **self.Par) # implemented by Michael Engel
                 
-            elif name.lower() == "empiricaldigest":
+            elif name.lower() == "empiricaldigest": # implemented by Michael Engel
                 X = val[0]
                 weights = val[1]
                 self.Par = {
@@ -891,13 +891,78 @@ class ERADist(object):
         else:
             raise RuntimeError("Unknown option :" + opt)
 #%%
-    def __add__(self, otherDist): # by Michael Engel
+    def __add__(self, otherDist): # implemented by Michael Engel
         if (isinstance(self.Dist, EmpDist) or isinstance(self.Dist, EmpDigest)) and (isinstance(otherDist.Dist, EmpDist) or isinstance(otherDist.Dist, EmpDigest)):
             result = deepcopy(self)
             other = deepcopy(otherDist)
             result.Dist = result.Dist+other.Dist
             return result
         raise NotImplementedError(f"Summation of {self.Dist} and {otherDist.Dist} not implemented!")        
+
+    def save(self, filePath, compressed=True): # implemented by Michael Engel
+        if self.Name not in {"empirical", "empiricaldigest"}:
+            raise NotImplementedError(
+                f"ERADist.save expected Name to be 'empirical' or 'empiricaldigest'. Other distributions like yours {self.Name} are not supported yet for saving and loading."
+            )
+
+        payload = self.Dist._to_storage_payload()
+        payload["eradist_marker"] = np.array("ERADist_1p0")
+        payload["eradist_name"] = np.array(str(self.Name))
+        payload["eradist_id"] = np.array(int(bool(self.ID)), dtype=np.int8)
+
+        if compressed:
+            np.savez_compressed(filePath, **payload)
+        else:
+            np.savez(filePath, **payload)
+
+    @classmethod
+    def load(cls, filePath): # implemented by Michael Engel
+        with np.load(filePath, allow_pickle=False) as raw:
+            payload = {key: raw[key] for key in raw.files}
+
+        eradist_marker = payload.get("eradist_marker", None)
+        eradist_name = str(payload["eradist_name"].item())
+        eradist_id = payload["eradist_id"].item()
+
+        if eradist_marker is None or str(eradist_marker.item()) != "ERADist_1p0":
+            raise ValueError("Unsupported file format for ERADist.load.")
+        
+        obj = cls.__new__(cls)
+        obj.Name = eradist_name
+        obj.ID = bool(int(eradist_id))
+        
+        dist_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"eradist_marker", "eradist_name", "eradist_id"}
+        }
+        if eradist_name == "empirical":
+            dist = EmpDist._from_storage_payload(dist_payload)
+            obj.Dist = dist
+            obj.Par = {
+                "pdfMethod": dist.pdfMethod,
+                "pdfPoints": dist.pdfPoints,
+            }
+            obj.Par.update(dist.pdfMethodParams)
+
+        elif eradist_name == "empiricaldigest":
+            dist = EmpDigest._from_storage_payload(dist_payload)
+            obj.Dist = dist
+            obj.Par = {
+                "nApprox": dist.nApprox,
+                "mode": dist.mode,
+                "eps": dist.eps,
+                "pdfMethod": dist.pdfMethod,
+                "pdfPoints": dist.pdfPoints,
+            }
+            obj.Par.update(dist.pdfMethodParams)
+
+        else:
+            raise NotImplementedError(
+                f"Unsupported ERADist empirical name in payload: {eradist_name}."
+            )
+
+        return obj
             
 #%%            
     def mean(self):

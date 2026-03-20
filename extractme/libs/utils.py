@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from contextlib import contextmanager
 import json
+from tkinter.font import names
 import numpy as np
 import boto3
 import re
@@ -133,7 +134,7 @@ def getRasterioAwsSession(key, secret, s3_endpoint, requester_pays, aws_region):
         gdal_env["AWS_SECRET_ACCESS_KEY"] = secret
     if aws_region:
         gdal_env["AWS_REGION"] = aws_region
-        
+    
     return aws_session, gdal_env
 
 @contextmanager
@@ -185,58 +186,59 @@ def computeCentroidCoverage(gdf, columnNamesPerBand, desiredSubscript="_centroid
     # Prepare geometries once for faster contains checks
     prepared = {i: prep(geom) for i, geom in tqdm(gdf[geometryColumn].items(), desc="Preparing geometries", total=len(gdf), disable=not progress)}
 
-    for b, (bandName, columns) in enumerate(columnNamesPerBand.items()):
-        if b==0:
-            cx_col = columns["center_x"]
-            cy_col = columns["center_y"]
-            cov_col = columns["coverage"]  # must exist and align 1:1 with center_x/center_y lists
-    
-            # Step 1: explode triplets (x, y, coverage) into long form
+    for b, (bandName, columns) in enumerate(tqdm(columnNamesPerBand.items(), desc="Computing centroid coverage per band", total=len(columnNamesPerBand), disable=not progress)):
+        # if b==0: disabled as to potential mismatch in between the centroid coverages of the bands as to different nodata masks
+        cx_col = columns["center_x"]
+        cy_col = columns["center_y"]
+        cov_col = columns["coverage"]  # must exist and align 1:1 with center_x/center_y lists
+
+        # Step 1: explode triplets (x, y, coverage) into long form
+        if progress:
+            print(f"Forming triplets for {bandName}...", flush=True)
+            triplets = gdf.progress_apply(
+                lambda r: list(zip(r[cx_col], r[cy_col], r[cov_col])),
+                axis=1
+            )
+        else:
+            triplets = gdf.apply(
+                lambda r: list(zip(r[cx_col], r[cy_col], r[cov_col])),
+                axis=1
+            )
+        
+        if progress:
+            print(f"Exploding dataframe for {bandName}.", flush=True)
+        exploded = (
+            gdf.reset_index()
+                .assign(triplets=triplets)
+                .explode("triplets", ignore_index=True)
+        )
+        exploded["center_x"] = exploded["triplets"].str[0]
+        exploded["center_y"] = exploded["triplets"].str[1]
+        exploded["coverage"] = exploded["triplets"].str[2]
+        exploded = exploded.drop(columns="triplets")
+
+        # Step 2: shortcut using per-point coverage
+        # coverage == 1.0 -> inside True; otherwise check geometry
+        exploded["inside"] = exploded["coverage"]==1.0
+        mask = ~exploded["inside"]
+        if mask.any():
+            # Use prepared parent polygon for the remaining checks
             if progress:
-                print("Forming triplets...")
-                triplets = gdf.progress_apply(
-                    lambda r: list(zip(r[cx_col], r[cy_col], r[cov_col])),
-                    axis=1
+                print(f"Checking points for {bandName}...", flush=True)
+                exploded.loc[mask, "inside"] = exploded.loc[mask].progress_apply(
+                    lambda r: prepared[r["index"]].contains(Point(r["center_x"], r["center_y"])), axis=1
                 )
             else:
-                triplets = gdf.apply(
-                    lambda r: list(zip(r[cx_col], r[cy_col], r[cov_col])),
-                    axis=1
+                exploded.loc[mask, "inside"] = exploded.loc[mask].apply(
+                    lambda r: prepared[r["index"]].contains(Point(r["center_x"], r["center_y"])), axis=1
                 )
-            
-            print("Exploding dataframe...")
-            exploded = (
-                gdf.reset_index()
-                   .assign(triplets=triplets)
-                   .explode("triplets", ignore_index=True)
-            )
-            exploded["center_x"] = exploded["triplets"].str[0]
-            exploded["center_y"] = exploded["triplets"].str[1]
-            exploded["coverage"] = exploded["triplets"].str[2]
-            exploded = exploded.drop(columns="triplets")
 
-            # Step 2: shortcut using per-point coverage
-            # coverage == 1.0 -> inside True; otherwise check geometry
-            exploded["inside"] = exploded["coverage"]==1.0
-            mask = ~exploded["inside"]
-            if mask.any():
-                # Use prepared parent polygon for the remaining checks
-                if progress:
-                    print("Checking points...")
-                    exploded.loc[mask, "inside"] = exploded.loc[mask].progress_apply(
-                        lambda r: prepared[r["index"]].contains(Point(r["center_x"], r["center_y"])), axis=1
-                    )
-                else:
-                    exploded.loc[mask, "inside"] = exploded.loc[mask].apply(
-                        lambda r: prepared[r["index"]].contains(Point(r["center_x"], r["center_y"])), axis=1
-                    )
-    
-            # Step 3: regroup results back into lists aligned with original rows
-            inside_lists = exploded.groupby("index")["inside"].apply(list)
+        # Step 3: regroup results back into lists aligned with original rows
+        inside_lists = exploded.groupby("index")["inside"].apply(list)
 
         # Step 4: assign back to original gdf for this band
         if progress:
-            print(f"Assigning centroid coverage to band {bandName}!")
+            print(f"Assigning centroid coverage to {bandName}.", flush=True)
         gdf[bandName + desiredSubscript] = gdf.index.map(inside_lists)
 
     return gdf
@@ -289,8 +291,13 @@ def _getColumnNamesPerBand(rasterInput, operations=["values", "coverage", "weigh
             for b in range(1, nBands+1):
                 names = {}
                 for op in operations:
-                    opName = op.__name__ if callable(op) else op
-                    names.update({opName: f"{p.stem}_band_{b}_{opName}"})
+                    if isinstance(op, dict):
+                        opNames = list(op.keys())
+                        for opName in opNames:
+                            names.update({opName: f"{p.stem}_band_{b}_{opName}"})
+                    else:
+                        opName = op.__name__ if callable(op) else op
+                        names.update({opName: f"{p.stem}_band_{b}_{opName}"})
                 columnNames.update({f"{p.stem}_band_{b}": names})
     return columnNames
 
@@ -305,7 +312,56 @@ def getColumnNamesPerBand(rasterInput, rasterInputBands=None, operations=["value
         for b in range(1, nBands+1):
             names = {}
             for op in operations:
-                opName = op.__name__ if callable(op) else op
-                names.update({opName: f"{p.stem}_band_{b}_{opName}"})
+                if isinstance(op, dict):
+                    opNames = list(op.keys())
+                    for opName in opNames:
+                        names.update({opName: f"{p.stem}_band_{b}_{opName}"})
+                else:
+                    opName = op.__name__ if callable(op) else op
+                    names.update({opName: f"{p.stem}_band_{b}_{opName}"})
             columnNames.update({f"{p.stem}_band_{b}": names})
+    return columnNames
+
+def getColumnNames(rasterInput, rasterInputBands=None, operations=["values", "coverage", "weights"]):
+    if rasterInputBands is None:
+        rasterInputBands = [1]*len(rasterInput)
+    assert len(rasterInputBands)==len(rasterInput)
+        
+    columnNames = []
+    for path, nBands in zip(rasterInput, rasterInputBands):
+        p = Path(path)
+        for b in range(1, nBands+1):
+            for op in operations:
+                if isinstance(op, dict):
+                    opNames = list(op.keys())
+                    for opName in opNames:
+                        columnNames.append(f"{p.stem}_band_{b}_{opName}")
+                else:
+                    opName = op.__name__ if callable(op) else op
+                    columnNames.append(f"{p.stem}_band_{b}_{opName}")
+    return columnNames
+
+def getColumnNamesPerOperation(rasterInput, rasterInputBands=None, operations=["values", "coverage", "weights"]):
+    if rasterInputBands is None:
+        rasterInputBands = [1]*len(rasterInput)
+    assert len(rasterInputBands)==len(rasterInput)
+        
+    columnNames = {}
+    for op in operations:
+        if isinstance(op, dict):
+            opNames = list(op.keys())
+            for opName in opNames:
+                columnNames[opName] = []
+                for path, nBands in zip(rasterInput, rasterInputBands):
+                    p = Path(path)
+                    for b in range(1, nBands+1):                        
+                        columnNames[opName].append(f"{p.stem}_band_{b}_{opName}")
+        else:
+            opName = op.__name__ if callable(op) else op
+            columnNames[opName] = []
+            for path, nBands in zip(rasterInput, rasterInputBands):
+                p = Path(path)
+                for b in range(1, nBands+1):                        
+                    columnNames[opName].append(f"{p.stem}_band_{b}_{opName}")
+        
     return columnNames

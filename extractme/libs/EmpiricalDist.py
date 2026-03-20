@@ -2,6 +2,7 @@ import numpy as np
 import scipy as scp
 import scipy.stats as sps
 from scipy.interpolate import interp1d
+import json
 
 class EmpDist():
     """
@@ -119,6 +120,177 @@ class EmpDist():
     def rvs(self, size=None):
         rands = np.random.rand(size)
         return self.icdf(rands)
+
+    # serialization and deserialization
+    @staticmethod
+    def _normalize_plain_dict(values):
+        if values is None:
+            return {}
+        if not isinstance(values, dict):
+            raise TypeError("Only dictionaries with primitive values are supported.")
+
+        normalized = {}
+        for key, value in values.items():
+            if not isinstance(key, str):
+                raise TypeError("All dictionary keys must be strings.")
+            if isinstance(value, np.generic):
+                value = value.item()
+            if value is None or isinstance(value, (bool, int, float, str)):
+                normalized[key] = value
+            else:
+                raise TypeError(f"Unsupported value type for key '{key}': {type(value)}")
+        return normalized
+
+    def _rebuild_runtime_state(self):
+        self.cleanData = np.asarray(self.cleanData, dtype=float).reshape(-1)
+        self.normalizedWeights = np.asarray(self.normalizedWeights, dtype=float).reshape(-1)
+
+        if self.cleanData.size == 0:
+            raise ValueError("Empirical distribution data must not be empty.")
+        if self.cleanData.size != self.normalizedWeights.size:
+            raise ValueError("Data and weights must have the same length.")
+
+        w_sum = np.sum(self.normalizedWeights)
+        if not np.isfinite(w_sum) or w_sum <= 0:
+            raise ValueError("Weights must have a finite positive sum.")
+        self.normalizedWeights = self.normalizedWeights / w_sum
+
+        self._N = int(self.cleanData.size)
+        self.totalN = int(getattr(self, "totalN", self._N))
+        self.sumWeights = float(getattr(self, "sumWeights", self._N))
+        self.totalWeight = float(getattr(self, "totalWeight", self.sumWeights))
+
+        self.pdfMethod = str(getattr(self, "pdfMethod", "kde"))
+        self.pdfPoints = int(getattr(self, "pdfPoints", np.max([2, int(np.sqrt(self._N))])))
+        self.pdfMethodParams = dict(getattr(self, "pdfMethodParams", {}))
+
+        self._mean = np.sum(self.cleanData * self.normalizedWeights)
+        self._var = np.cov(self.cleanData, aweights=self.normalizedWeights)
+        self._std = np.sqrt(self._var)
+
+        self._cdf = create_weighted_cdf_interp1d(self.cleanData, self.normalizedWeights, kind="previous")
+        self._ppf = create_weighted_ppf_interp1d(self.cleanData, self.normalizedWeights, kind="next")
+
+        if self.pdfMethod.lower() == "kde":
+            dataSorted, weightsSorted = sortDataWeights(self.cleanData, self.normalizedWeights)
+            self._pdf = sps.gaussian_kde(dataset=dataSorted, weights=weightsSorted, **self.pdfMethodParams)
+        else:
+            self._pdf = create_normalized_pdf_from_cdf(
+                self._cdf,
+                self.cleanData.min(),
+                self.cleanData.max(),
+                num_points=self.pdfPoints,
+                kind=self.pdfMethod.lower(),
+            )
+
+    def to_dict(self):
+        state = {
+            "class_name": self.__class__.__name__,
+            "cleanData": np.asarray(self.cleanData, dtype=float),
+            "normalizedWeights": np.asarray(self.normalizedWeights, dtype=float),
+            "sumWeights": float(self.sumWeights),
+            "totalWeight": float(self.totalWeight),
+            "totalN": int(self.totalN),
+            "pdfMethod": str(self.pdfMethod),
+            "pdfPoints": int(self.pdfPoints),
+            "pdfMethodParams": self._normalize_plain_dict(self.pdfMethodParams),
+        }
+
+        if isinstance(self, EmpDigest):
+            state["nApprox"] = int(self.nApprox)
+            state["mode"] = str(self.mode)
+            state["eps"] = None if self.eps is None else float(self.eps)
+
+        return state
+
+    @classmethod
+    def from_dict(cls, state):
+        class_name = str(state["class_name"])
+        if class_name == "EmpDigest":
+            target_cls = EmpDigest
+        elif class_name == "EmpDist":
+            target_cls = EmpDist
+        else:
+            raise ValueError(f"Unsupported empirical distribution class in state: {class_name}")
+
+        obj = target_cls.__new__(target_cls)
+        obj.cleanData = np.asarray(state["cleanData"], dtype=float)
+        obj.normalizedWeights = np.asarray(state["normalizedWeights"], dtype=float)
+        obj.sumWeights = float(state["sumWeights"])
+        obj.totalWeight = float(state["totalWeight"])
+        obj.totalN = int(state["totalN"])
+        obj.pdfMethod = str(state["pdfMethod"])
+        obj.pdfPoints = int(state["pdfPoints"])
+        obj.pdfMethodParams = cls._normalize_plain_dict(state.get("pdfMethodParams", {}))
+
+        if target_cls is EmpDigest:
+            obj.nApprox = int(state["nApprox"])
+            obj.mode = str(state["mode"])
+            obj.eps = state.get("eps", None)
+
+        obj._rebuild_runtime_state()
+        return obj
+
+    def _to_storage_payload(self):
+        state = self.to_dict()
+        payload = {
+            "class_name": np.array(state["class_name"]),
+            "cleanData": state["cleanData"],
+            "normalizedWeights": state["normalizedWeights"],
+            "sumWeights": np.array(state["sumWeights"]),
+            "totalWeight": np.array(state["totalWeight"]),
+            "totalN": np.array(state["totalN"]),
+            "pdfMethod": np.array(state["pdfMethod"]),
+            "pdfPoints": np.array(state["pdfPoints"]),
+            "pdfMethodParams": np.array(json.dumps(state["pdfMethodParams"], sort_keys=True)),
+        }
+
+        if state["class_name"] == "EmpDigest":
+            payload["nApprox"] = np.array(state["nApprox"])
+            payload["mode"] = np.array(state["mode"])
+            payload["eps"] = np.array(np.nan if state["eps"] is None else state["eps"])
+
+        return payload
+
+    @classmethod
+    def _from_storage_payload(cls, payload):
+        class_name = str(payload["class_name"].item())
+        state = {
+            "class_name": class_name,
+            "cleanData": np.asarray(payload["cleanData"], dtype=float),
+            "normalizedWeights": np.asarray(payload["normalizedWeights"], dtype=float),
+            "sumWeights": float(payload["sumWeights"].item()),
+            "totalWeight": float(payload["totalWeight"].item()),
+            "totalN": int(payload["totalN"].item()),
+            "pdfMethod": str(payload["pdfMethod"].item()),
+            "pdfPoints": int(payload["pdfPoints"].item()),
+            "pdfMethodParams": json.loads(str(payload["pdfMethodParams"].item())),
+        }
+
+        if class_name == "EmpDigest":
+            eps_raw = float(payload["eps"].item())
+            state["nApprox"] = int(payload["nApprox"].item())
+            state["mode"] = str(payload["mode"].item())
+            state["eps"] = None if np.isnan(eps_raw) else eps_raw
+
+        return cls.from_dict(state)
+
+    def save(self, filePath, compressed=True):
+        payload = self._to_storage_payload()
+        if compressed:
+            np.savez_compressed(filePath, **payload)
+        else:
+            np.savez(filePath, **payload)
+
+    @classmethod
+    def load(cls, filePath):
+        with np.load(filePath, allow_pickle=False) as raw:
+            payload = {key: raw[key] for key in raw.files}
+
+        loaded = cls._from_storage_payload(payload)
+        if cls is EmpDigest and not isinstance(loaded, EmpDigest):
+            raise TypeError("Loaded file contains an EmpDist object, not an EmpDigest object.")
+        return loaded
     
 class EmpDigest(EmpDist):
     """
@@ -232,7 +404,7 @@ def create_normalized_pdf_from_cdf(cdf_func, x_min, x_max, num_points=1000, kind
     cdf_vals = cdf_func(x_grid)
     
     raw_pdf_vals = np.gradient(cdf_vals, x_grid)
-    area = np.trapz(raw_pdf_vals, x_grid)
+    area = np.trapezoid(raw_pdf_vals, x_grid)
     
     if area != 0:
         pdf_vals = raw_pdf_vals / area

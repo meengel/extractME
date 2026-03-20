@@ -72,10 +72,18 @@ def unweightedVar(values, coverage, weights, ignoreValues=[], filterFun=None):
 
 # std related
 def std(values, coverage, weights, ignoreValues=[], filterFun=None):
-    return np.sqrt(var(values, coverage, weights, ignoreValues=ignoreValues, filterFun=filterFun))
+    var_ = var(values, coverage, weights, ignoreValues=ignoreValues, filterFun=filterFun)
+    if var_ is None:
+        return None
+    else:
+        return np.sqrt(var_)
 
 def unweightedStd(values, coverage, weights, ignoreValues=[], filterFun=None):
-    return np.sqrt(unweightedVar(values, coverage, weights, ignoreValues=ignoreValues, filterFun=filterFun))
+    var_ = unweightedVar(values, coverage, weights, ignoreValues=ignoreValues, filterFun=filterFun)
+    if var_ is None:
+        return None
+    else:
+        return np.sqrt(var_)
 
 # weight related
 def weight(values, coverage, weights, ignoreValues=[], filterFun=None):

@@ -1,5 +1,6 @@
 import numpy as np
 import uuid
+import os
 from pathlib import Path
 import rasterio
 from rasterio.windows import Window
@@ -208,17 +209,25 @@ def calculatePixelAreaTif(
             tasks.append((src_path, row_off, col_off, nrows, ncols, int(points_per_edge), transform, src_crs))
 
     # compute in parallel and write results in main process
-    with rasterio.open(dst_path, 'w', **profile) as dst:
-        if num_workers:
-            with ProcessPoolExecutor(max_workers=num_workers) as exe:
-                futures = [exe.submit(_compute_block_vectorized, *task) for task in tasks]
-                for fut in tqdm(as_completed(futures), desc="Blockwise Area Computation", total=len(tasks), disable=not progress):
-                    row_off, col_off, nrows, ncols, block = fut.result()
+    final_dst_path = dst_path
+    tmp_dst_path = f"{dst_path}.tmp-{uuid.uuid4().hex}"
+    try:
+        with rasterio.open(tmp_dst_path, 'w', **profile) as dst:
+            if num_workers:
+                with ProcessPoolExecutor(max_workers=num_workers) as exe:
+                    futures = [exe.submit(_compute_block_vectorized, *task) for task in tasks]
+                    for fut in tqdm(as_completed(futures), desc="Blockwise Area Computation", total=len(tasks), disable=not progress):
+                        row_off, col_off, nrows, ncols, block = fut.result()
+                        dst.write(block, 1, window=Window(col_off, row_off, ncols, nrows))
+            else:
+                for task in tqdm(tasks, desc="Blockwise Area Computation", disable=not progress):
+                    row_off, col_off, nrows, ncols, block = _compute_block_vectorized(*task)
                     dst.write(block, 1, window=Window(col_off, row_off, ncols, nrows))
-        else:
-            for task in tqdm(tasks, desc="Blockwise Area Computation", disable=not progress):
-                row_off, col_off, nrows, ncols, block = _compute_block_vectorized(*task)
-                dst.write(block, 1, window=Window(col_off, row_off, ncols, nrows))
-    dst.close()
+        dst.close() # redundant but ensures file is closed before moving
+        os.replace(tmp_dst_path, final_dst_path)
+    except Exception:
+        if os.path.exists(tmp_dst_path):
+            os.remove(tmp_dst_path)
+        raise
 
-    return dst_path
+    return final_dst_path

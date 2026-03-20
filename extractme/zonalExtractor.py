@@ -3,6 +3,7 @@ from functools import partial
 import rasterio
 from rasterio.env import Env
 import geopandas as gpd
+import pandas as pd
 from tqdm import tqdm
 tqdm.pandas()
 
@@ -100,8 +101,7 @@ def extractChosenOps(
         weights = None
     weights = utils._lenList(weights, len(rasterInput))
 
-    if keepColumns is None:
-        keepColumns = []
+    keepColumns = list(keepColumns) if keepColumns is not None else []
     if idColumn is None:
         gdfFull[idColumnFallbackName] = gdfFull.index
         idColumn = idColumnFallbackName
@@ -1088,47 +1088,55 @@ def processRawExtraction(
                 toDropIdx.append(r)
         resultGdf = resultGdf.drop(index=toDropIdx)
     
+    newColumns = {} # no direct insertion of columns as to potential defragmentation issues when inserting columns one by one
     for b, (bandName, columns) in enumerate(columnNamesPerBand.items()):
         if progress:
             print(f"Start processing of band {b+1} of in total {len(columnNamesPerBand)} bands!")
         for fun, desiredSubscript, tag in zip(funs, desiredSubscripts, tags):
-            _processColumn(resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
+            _processColumn(newColumns, resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
         for fun, desiredSubscript, tag in zip(centroidBasedFuns, centroidBasedDesiredSubscripts, centroidBasedTags):
             if tag=="partialCentroidBased":
-                _processColumnPartialCentroidBased(resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
+                _processColumnPartialCentroidBased(newColumns, resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
             else:
-                _processColumnCentroidBased(resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
-            
+                _processColumnCentroidBased(newColumns, resultGdf, bandName, columns, desiredSubscript=desiredSubscript, fun=fun, progress=progress)
+        
     if keepRawExtraction is False:
         rawColumns = []
         for columns in columnNamesPerBand.values():
             rawColumns.extend(columns.values())
         resultGdf.drop(columns=rawColumns, inplace=True)
     
+    if len(newColumns)>0:
+        # for k, s in newColumns.items():
+        #     newColumns[k] = s.reindex(resultGdf.index)
+        newColumnsGdf = pd.DataFrame(newColumns, index=resultGdf.index)
+        merged = pd.concat([resultGdf, newColumnsGdf], axis=1)
+        resultGdf = gpd.GeoDataFrame(merged, geometry=resultGdf.geometry.name, crs=resultGdf.crs)
+    
     return resultGdf
 
-def _processColumn(resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
+def _processColumn(newColumns, resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
     if progress:
         print("Processing", bandName+desiredSubscript, "using the", fun.func.__name__ if isinstance(fun, partial) else fun.__name__, "function:")
-        resultGdf[bandName+desiredSubscript] = resultGdf.progress_apply(lambda row: fun(row[columns["values"]], row[columns["coverage"]], row[columns["weights"]]), axis=1)
+        newColumns[bandName+desiredSubscript] = resultGdf.progress_apply(lambda row: fun(row[columns["values"]], row[columns["coverage"]], row[columns["weights"]]), axis=1)
     else:
-        resultGdf[bandName+desiredSubscript] = resultGdf.apply(lambda row: fun(row[columns["values"]], row[columns["coverage"]], row[columns["weights"]]), axis=1)
+        newColumns[bandName+desiredSubscript] = resultGdf.apply(lambda row: fun(row[columns["values"]], row[columns["coverage"]], row[columns["weights"]]), axis=1)
         
-def _processColumnCentroidBased(resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
+def _processColumnCentroidBased(newColumns, resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
     if progress:
         print("Processing", bandName+desiredSubscript, "using the", fun.func.__name__ if isinstance(fun, partial) else fun.__name__, "function:")
-        resultGdf[bandName+desiredSubscript] = resultGdf.progress_apply(lambda row: fun(row[columns["values"]], row[columns["centroidCoverage"]], row[columns["weights"]]), axis=1)
+        newColumns[bandName+desiredSubscript] = resultGdf.progress_apply(lambda row: fun(row[columns["values"]], row[columns["centroidCoverage"]], row[columns["weights"]]), axis=1)
     else:
-        resultGdf[bandName+desiredSubscript] = resultGdf.apply(lambda row: fun(row[columns["values"]], row[columns["centroidCoverage"]], row[columns["weights"]]), axis=1)
+        newColumns[bandName+desiredSubscript] = resultGdf.apply(lambda row: fun(row[columns["values"]], row[columns["centroidCoverage"]], row[columns["weights"]]), axis=1)
 
-def _processColumnPartialCentroidBased(resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
+def _processColumnPartialCentroidBased(newColumns, resultGdf, bandName, columns, desiredSubscript, fun, desc=None, progress=False):
     if progress:
         print("Processing", bandName+desiredSubscript, "using the", fun.func.__name__ if isinstance(fun, partial) else fun.__name__, "function:")
-        resultGdf[bandName+desiredSubscript] = resultGdf.progress_apply(
+        newColumns[bandName+desiredSubscript] = resultGdf.progress_apply(
             lambda row: fun(row[columns["values"]], np.array(row[columns["centroidCoverage"]])*np.array(row[columns["coverage"]]), row[columns["weights"]]), axis=1
         )
     else:
-        resultGdf[bandName+desiredSubscript] = resultGdf.apply(
+        newColumns[bandName+desiredSubscript] = resultGdf.apply(
             lambda row: fun(row[columns["values"]], np.array(row[columns["centroidCoverage"]])*np.array(row[columns["coverage"]]), row[columns["weights"]]), axis=1
         )
         
